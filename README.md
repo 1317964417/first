@@ -23,7 +23,7 @@ ps:     from absl import app, flags
  3.3、运行NBC_new.py文件 该代码用来提取每个神经元的最大输出与最小输出
  3.4、运行FGSM获得受攻击后的模型cifar10_3_adv_FGSM.pkl
  3.5、运行NBC_adv_PGD_and_FGSM.py，目前就只有cifar10_3_adv_FGSM.pkl这一个模型可以用，然后获取最大最小输出
- 
+ ![image](https://github.com/1317964417/Test/blob/main/picture/%E5%9B%BE%E7%89%871.png)
  
  后面的继续
 
