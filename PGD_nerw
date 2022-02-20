@@ -1,0 +1,141 @@
+import copy
+import torch as t
+import torchvision as tv
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+import torchvision.transforms as transforms
+
+k = 8
+lr = 0.001
+alpha = 0.00784
+epsilon = 0.3
+
+# 定义对数据的预处理
+transform = transforms.Compose([
+    transforms.ToTensor(),  # 转为Tensor，把灰度范围从0-255变换到0-1，归一化
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # 把0-1变为-1到1，标准化
+])
+
+# 训练集
+trainset = tv.datasets.CIFAR10(
+    root='./cifar-10-python/',
+    train=True,
+    download=True,
+    transform=transform)
+
+trainloader = t.utils.data.DataLoader(  # 主要用来将自定义的数据读取接口的输出或者PyTorch已有的数据读取接口的输入按照batch size封装成Tensor，
+    # 后续只需要再包装成Variable即可作为模型的输入
+    trainset,
+    batch_size=4,
+    shuffle=True,
+    num_workers=0  # 多线程
+)
+
+# 测试集
+testset = tv.datasets.CIFAR10(
+    root='./cifar-10-python/',
+    train=False,
+    download=True,
+    transform=transform)
+
+testloader = t.utils.data.DataLoader(
+    trainset,
+    batch_size=4,
+    shuffle=False,
+    num_workers=0)
+
+classes = ("plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck")
+
+
+class PGDAttack():
+    def __init__(self, model):
+        self.model = model
+
+    def perturb(self, x_natural, y):
+        x = x_natural.detach()
+        x = x + t.zeros_like(x).uniform_(-epsilon, epsilon)
+        for i in range(k):
+            x.requires_grad_()
+            with  t.enable_grad():
+                logits = self.model(x)
+                loss = F.cross_entropy(logits, y)
+            grad = t.autograd.grad(loss, [x])[0]
+            x = x.detach() + alpha * t.sign(grad.detach())
+            x = t.min(t.max(x, x_natural - epsilon), x_natural + epsilon)
+            x = t.clamp(x, 0, 1)
+        return x
+
+
+def attack(x, y, model, adversary):
+    model_copied = copy.deepcopy(model)
+    model_copied.eval()
+    adversary.model = model_copied
+    adv = adversary.perturb(x, y)
+    return adv
+
+
+class Net(nn.Module):
+    # 把网络中具有可学习参数的层放在构造函数__inif__中
+    def __init__(self):
+        # 下式等价于nn.Module.__init__.(self)
+        super(Net, self).__init__()  # RGB 3*32*32
+        self.conv1 = nn.Conv2d(3, 15, 3)  # 输入3通道，输出15通道，卷积核为3*3
+        self.conv2 = nn.Conv2d(15, 75, 4)  # 输入15通道，输出75通道，卷积核为4*4
+        self.conv3 = nn.Conv2d(75, 375, 3)  # 输入75通道，输出375通道，卷积核为3*3
+        self.fc1 = nn.Linear(1500, 400)  # 输入2000，输出400
+        self.fc2 = nn.Linear(400, 120)  # 输入400，输出120
+        self.fc3 = nn.Linear(120, 84)  # 输入120，输出84
+        self.fc4 = nn.Linear(84, 10)  # 输入 84，输出 10（分10类）
+
+    def forward(self, x):
+        x = F.max_pool2d(F.relu(self.conv1(x)), 2)  # 3*32*32  -> 150*30*30  -> 15*15*15
+        x = F.max_pool2d(F.relu(self.conv2(x)), 2)  # 15*15*15 -> 75*12*12  -> 75*6*6
+        x = F.max_pool2d(F.relu(self.conv3(x)), 2)  # 75*6*6   -> 375*4*4   -> 375*2*2
+        x = x.view(x.size()[0], -1)  # 将375*2*2的tensor打平成1维，1500
+        x = F.relu(self.fc1(x))  # 全连接层 1500 -> 400
+        x = F.relu(self.fc2(x))  # 全连接层 400 -> 120
+        x = F.relu(self.fc3(x))  # 全连接层 120 -> 84
+        x = self.fc4(x)  # 全连接层 84  -> 10
+        return x
+
+
+net = Net()
+
+adversary = PGDAttack(net)
+from torch import optim
+
+criterion = nn.CrossEntropyLoss()  # 交叉熵损失函数
+optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)  # 优化器：随机梯度下降
+
+
+def train(epoch):
+    running_loss = 0.0
+    for i, data in enumerate(trainloader, 0):
+        # enumerate() 函数：用于将一个可遍历的数据对象(如列表、元组或字符串)组合为一个索引序列，同时列出数据和数据下标，一般用在 for 循环当中
+        # enumerate(sequence, [start=0])
+        # sequence -- 一个序列、迭代器或其他支持迭代对象。
+        # start -- 下标起始位置。
+
+        # 输入数据
+        inputs, labels = data
+        inputs, labels = Variable(inputs), Variable(labels)
+        optimizer.zero_grad()
+        adv = adversary.perturb(inputs, labels)
+        adv_outputs = net(adv)
+        loss = criterion(adv_outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()  # 2000个batch的误差和
+        if i % 2000 == 1999:  # 每2000个batch打印一次训练状态
+            print("[%d,%5d] loss: %.3f" \
+                  % (epoch + 1, i + 1, running_loss / 2000))
+            running_loss = 0.0
+
+
+for epoch in range(8):
+    train(epoch)
+    print("Finished Training")
+    t.save(net, "cifar10_3_adv_PGD.pkl")
+    # 保存網絡當前的狀態
+    t.save(net.state_dict(), "cifar10_new_3_adv_PGD.pkl")
